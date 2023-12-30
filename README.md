@@ -37,6 +37,11 @@ The most troublefree and reproducable method of building the repository is via t
     make -j12 deploy                    # for setup.exe adjust 12 cores to your core count requires nsis see doc/build-windows.md for deps
 
 
+# FAST SYNC --> REALLY FAST around 4 hours for a 2gb prune from a fresh start
+![s1](https://raw.githubusercontent.com/bitnet-io/bitcoin/master/fast.png)
+
+
+
 License
 -------
 
