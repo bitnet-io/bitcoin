@@ -313,7 +313,7 @@ static RPCHelpMan addnode()
                 {
                     {"node", RPCArg::Type::STR, RPCArg::Optional::NO, "The address of the peer to connect to"},
                     {"command", RPCArg::Type::STR, RPCArg::Optional::NO, "'add' to add a node to the list, 'remove' to remove a node from the list, 'onetry' to try a connection to the node once"},
-                    {"v2transport", RPCArg::Type::BOOL, RPCArg::Default{false}, "Attempt to connect using BIP324 v2 transport protocol (ignored for 'remove' command)"},
+                    {"v2transport", RPCArg::Type::BOOL, RPCArg::DefaultHint{"set by -v2transport"}, "Attempt to connect using BIP324 v2 transport protocol (ignored for 'remove' command)"},
                 },
                 RPCResult{RPCResult::Type::NONE, "", ""},
                 RPCExamples{
@@ -332,9 +332,10 @@ static RPCHelpMan addnode()
     CConnman& connman = EnsureConnman(node);
 
     const std::string node_arg{request.params[0].get_str()};
-    bool use_v2transport = self.Arg<bool>(2);
+    bool node_v2transport = connman.GetLocalServices() & NODE_P2P_V2;
+    bool use_v2transport = self.MaybeArg<bool>(2).value_or(node_v2transport);
 
-    if (use_v2transport && !(node.connman->GetLocalServices() & NODE_P2P_V2)) {
+    if (use_v2transport && !node_v2transport) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport requested but not enabled (see -v2transport)");
     }
 
@@ -370,6 +371,7 @@ static RPCHelpMan addconnection()
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The IP address and port to attempt connecting to."},
             {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\", \"addr-fetch\" or \"feeler\")."},
+            {"v2transport", RPCArg::Type::BOOL, RPCArg::Optional::NO, "Attempt to connect using BIP324 v2 transport protocol"},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -378,8 +380,8 @@ static RPCHelpMan addconnection()
                 { RPCResult::Type::STR, "connection_type", "Type of connection opened." },
             }},
         RPCExamples{
-            HelpExampleCli("addconnection", "\"192.168.0.6:8333\" \"outbound-full-relay\"")
-            + HelpExampleRpc("addconnection", "\"192.168.0.6:8333\" \"outbound-full-relay\"")
+            HelpExampleCli("addconnection", "\"192.168.0.6:8333\" \"outbound-full-relay\" true")
+            + HelpExampleRpc("addconnection", "\"192.168.0.6:8333\" \"outbound-full-relay\" true")
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -401,11 +403,16 @@ static RPCHelpMan addconnection()
     } else {
         throw JSONRPCError(RPC_INVALID_PARAMETER, self.ToString());
     }
+    bool use_v2transport = self.Arg<bool>(2);
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
     CConnman& connman = EnsureConnman(node);
 
-    const bool success = connman.AddConnection(address, conn_type);
+    if (use_v2transport && !(connman.GetLocalServices() & NODE_P2P_V2)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: Adding v2transport connections requires -v2transport init flag to be set.");
+    }
+
+    const bool success = connman.AddConnection(address, conn_type, use_v2transport);
     if (!success) {
         throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, "Error: Already at capacity for specified connection type.");
     }
@@ -600,8 +607,8 @@ static UniValue GetNetworksInfo()
         obj.pushKV("name", GetNetworkName(network));
         obj.pushKV("limited", !g_reachable_nets.Contains(network));
         obj.pushKV("reachable", g_reachable_nets.Contains(network));
-        obj.pushKV("proxy", proxy.IsValid() ? proxy.proxy.ToStringAddrPort() : std::string());
-        obj.pushKV("proxy_randomize_credentials", proxy.randomize_credentials);
+        obj.pushKV("proxy", proxy.IsValid() ? proxy.ToString() : std::string());
+        obj.pushKV("proxy_randomize_credentials", proxy.m_randomize_credentials);
         networks.push_back(obj);
     }
     return networks;
@@ -944,7 +951,7 @@ static RPCHelpMan getnodeaddresses()
 static RPCHelpMan addpeeraddress()
 {
     return RPCHelpMan{"addpeeraddress",
-        "\nAdd the address of a potential peer to the address manager. This RPC is for testing only.\n",
+        "Add the address of a potential peer to an address manager table. This RPC is for testing only.",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The IP address of the peer"},
             {"port", RPCArg::Type::NUM, RPCArg::Optional::NO, "The port of the peer"},
@@ -953,7 +960,8 @@ static RPCHelpMan addpeeraddress()
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::BOOL, "success", "whether the peer address was successfully added to the address manager"},
+                {RPCResult::Type::BOOL, "success", "whether the peer address was successfully added to the address manager table"},
+                {RPCResult::Type::STR, "error", /*optional=*/true, "error description, if the address could not be added"},
             },
         },
         RPCExamples{
@@ -982,8 +990,13 @@ static RPCHelpMan addpeeraddress()
             success = true;
             if (tried) {
                 // Attempt to move the address to the tried addresses table.
-                addrman.Good(address);
+                if (!addrman.Good(address)) {
+                    success = false;
+                    obj.pushKV("error", "failed-adding-to-tried");
+                }
             }
+        } else {
+            obj.pushKV("error", "failed-adding-to-new");
         }
     }
 
